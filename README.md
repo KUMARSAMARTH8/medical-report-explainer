@@ -1,0 +1,290 @@
+# AI Medical Report Explainer
+
+Turns a blood test report (PDF or photo) into plain-English explanations,
+flags abnormal values, gives educational risk notes + lifestyle tips, and
+answers follow-up questions through a chatbot.
+
+[![CI](https://github.com/YOUR_USERNAME/YOUR_REPO/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+> **This is an educational tool only.** It does not diagnose, treat, or
+> replace a doctor. Every explanation ends by recommending professional
+> follow-up for abnormal results.
+
+---
+
+## Contents
+
+- [Project structure](#1-project-structure)
+- [How it works](#2-how-it-works-pipeline)
+- [Quickstart (local)](#3-quickstart-local)
+- [Configuration (.env)](#4-configuration-env)
+- [Running with Docker](#5-running-with-docker)
+- [Testing](#6-testing)
+- [Deployment](#7-deployment-free-tier-friendly)
+- [Extending this project](#8-extending-this-project)
+- [Interview-ready explanation](#9-interview-ready-explanation)
+
+---
+
+## 1. Project structure
+
+```
+medical-report-explainer/
+│
+├── backend/
+│   ├── main.py                   # FastAPI app (all endpoints)
+│   ├── config.py                 # Typed settings, loaded from .env
+│   ├── requirements.txt
+│   ├── requirements-dev.txt       # + pytest, httpx, coverage
+│   ├── .env.example               # Copy to .env and edit
+│   ├── pytest.ini
+│   ├── Dockerfile
+│   ├── nlp/
+│   │   ├── extractor.py           # PDF / OCR text extraction
+│   │   ├── medical_parser.py      # Regex-based parameter detection ("NER-lite")
+│   │   ├── summarizer.py          # Plain-English explanation generator
+│   │   └── chatbot.py             # Retrieval-based Q&A chatbot
+│   ├── ml/
+│   │   └── disease_predictor.py   # Rule-based risk analysis + wellness score
+│   ├── utils/
+│   │   ├── normal_ranges.py       # Reference ranges + risk/lifestyle knowledge base
+│   │   ├── db.py                  # SQLite persistence (report history)
+│   │   ├── logger.py              # Central logging config
+│   │   └── rate_limit.py          # Lightweight in-memory rate limiter
+│   ├── tests/
+│   │   ├── test_pipeline.py       # Unit tests (parser, summarizer, risks, chatbot)
+│   │   └── test_api.py            # Integration tests (FastAPI TestClient)
+│   └── reports/                   # Uploaded files land here transiently (auto-created)
+│
+├── frontend/
+│   ├── index.html
+│   ├── css/style.css
+│   ├── js/app.js
+│   ├── js/config.example.js       # Copy to config.js and set API_BASE
+│   └── Dockerfile
+│
+├── .github/workflows/ci.yml        # Runs the test suite on every push/PR
+├── docker-compose.yml               # One command: backend + frontend together
+├── Makefile                          # make install / run / test / docker-up
+├── .gitignore
+├── LICENSE                            # MIT
+└── README.md
+```
+
+---
+
+## 2. How it works (pipeline)
+
+```
+Upload (PDF/Image)
+      │
+      ▼
+extractor.py        → raw text (PyMuPDF for PDFs, EasyOCR for images)
+      │
+      ▼
+medical_parser.py   → structured parameters (name, value, unit, status)
+      │
+      ▼
+summarizer.py        → plain-English explanation per parameter
+      │
+      ▼
+disease_predictor.py → rule-based risks + lifestyle tips + wellness score
+      │
+      ▼
+db.py                → saved to SQLite for the trend dashboard
+      │
+      ▼
+chatbot.py            → answers follow-up questions using the same data
+```
+
+Parameter detection is regex/alias-based rather than a trained NER model —
+deliberate, so the project runs with no GPU/model downloads while still
+demonstrating the full pipeline. `medical_parser.py` and `chatbot.py` both
+have comments showing where you'd swap in spaCy / Hugging Face models for
+a more advanced version.
+
+---
+
+## 3. Quickstart (local)
+
+The fastest path uses the included `Makefile`:
+
+```bash
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+cd medical-report-explainer
+
+make install     # creates venv, installs deps, creates .env + config.js from examples
+make run         # starts the backend at http://127.0.0.1:8000
+```
+
+In a second terminal:
+
+```bash
+make frontend    # serves the frontend at http://127.0.0.1:5500
+```
+
+Open `http://127.0.0.1:5500`, upload a sample lab report, and you're done.
+
+### Manual setup (no Make)
+
+```bash
+cd backend
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+cp .env.example .env             # then edit values if needed
+uvicorn main:app --reload --port 8000
+```
+
+```bash
+cd frontend
+cp js/config.example.js js/config.js   # then edit API_BASE if needed
+python3 -m http.server 5500
+```
+
+> EasyOCR downloads a small model the first time it runs (needs internet on
+> first use only). If you only need PDF support, you can skip
+> `easyocr`/`pytesseract` in `requirements.txt`.
+
+Check the backend is alive: `http://127.0.0.1:8000/api/health`. Interactive
+API docs (auto-generated by FastAPI): `http://127.0.0.1:8000/docs`.
+
+---
+
+## 4. Configuration (`.env`)
+
+All backend behavior is controlled by `backend/.env` (see
+`backend/.env.example` for the full list with comments). Nothing else in
+the codebase reads environment variables directly — everything goes
+through `config.py`, so this file is the single source of truth:
+
+| Variable                        | Default              | What it controls                                      |
+|----------------------------------|-----------------------|--------------------------------------------------------|
+| `ENVIRONMENT`                    | `development`         | Label shown in `/api/health`, informs deploy behavior   |
+| `LOG_LEVEL`                      | `INFO`                | `DEBUG` / `INFO` / `WARNING` / `ERROR`                  |
+| `HOST` / `PORT`                  | `127.0.0.1` / `8000`  | Where uvicorn binds                                     |
+| `CORS_ORIGINS`                   | `*`                   | Comma-separated allowed frontend origins (lock down in prod) |
+| `MAX_UPLOAD_SIZE_MB`             | `10`                  | Hard cap on uploaded file size                          |
+| `ALLOWED_EXTENSIONS`             | `.pdf,.png,.jpg,...`  | Accepted file types                                     |
+| `REPORTS_DIR`                   | `reports`             | Where uploads are temporarily written                   |
+| `DELETE_FILES_AFTER_PROCESSING`  | `true`                | Deletes the raw upload once parsed (privacy-friendly)   |
+| `DB_PATH`                        | `reports.db`          | SQLite file location                                    |
+| `ENABLE_SEMANTIC_CHATBOT`         | `false`               | Turns on `sentence-transformers` matching if installed  |
+| `RATE_LIMIT_PER_MINUTE`          | `30`                  | Per-IP request cap (`0` disables it)                    |
+
+The frontend has its own tiny config file, `frontend/js/config.js` (copied
+from `config.example.js`), so the API URL can differ per environment
+without touching `app.js`:
+
+```js
+window.APP_CONFIG = {
+  API_BASE: "http://127.0.0.1:8000",
+};
+```
+
+---
+
+## 5. Running with Docker
+
+```bash
+cp backend/.env.example backend/.env    # edit if needed
+docker compose up --build
+```
+
+- Backend → `http://localhost:8000`
+- Frontend → `http://localhost:5500`
+
+`docker-compose.yml` persists the SQLite DB and report uploads in named
+volumes, and both services restart automatically unless stopped. Backend
+has a container healthcheck against `/api/health`.
+
+To stop: `docker compose down` (or `make docker-down`).
+
+---
+
+## 6. Testing
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+19 tests cover:
+- **`test_pipeline.py`** — parameter parsing/classification (including a
+  regression test for a Total-Cholesterol/LDL regex collision that was
+  caught during development), explanation generation, rule-based risk
+  analysis, wellness scoring, and chatbot Q&A.
+- **`test_api.py`** — the full HTTP surface via FastAPI's `TestClient`:
+  file-type validation, a real end-to-end PDF upload and analysis, chat
+  validation, and 404 handling — each test runs against an isolated
+  temp SQLite DB and reports folder, so tests never touch your real data.
+
+CI (`.github/workflows/ci.yml`) runs this suite automatically on every
+push and pull request to `main`.
+
+---
+
+## 7. Deployment (free-tier friendly)
+
+- **Backend** → Render / Railway / Fly.io (anything that runs the
+  provided `Dockerfile`, or `uvicorn main:app`). Set `HOST=0.0.0.0` and
+  the platform's assigned `PORT` via environment variables.
+- **Frontend** → Netlify / Vercel / GitHub Pages (static hosting), or the
+  provided `frontend/Dockerfile` (nginx). Set `API_BASE` in
+  `frontend/js/config.js` to your deployed backend URL, and add that
+  frontend origin to `CORS_ORIGINS` in the backend's `.env` — don't leave
+  it as `*` in production.
+
+---
+
+## 8. Extending this project
+
+- **Better parameter detection**: swap `medical_parser.py`'s regex engine
+  for a spaCy `EntityRuler` or a biomedical NER model (e.g. scispaCy) —
+  generalizes better to messy, inconsistent report layouts.
+- **LLM-generated explanations**: `summarizer.py` has a
+  `generate_with_llm()` stub showing where to plug in a Hugging Face
+  `text-generation` pipeline for more natural phrasing.
+- **Semantic chatbot**: `chatbot.py` already supports
+  `sentence-transformers` for semantic FAQ matching — install it and set
+  `ENABLE_SEMANTIC_CHATBOT=true` in `.env` to switch it on.
+- **Real ML risk classifier**: `disease_predictor.py` has a
+  `train_ml_classifier()` stub — with a labelled dataset you could replace
+  the transparent rule engine with a trained model (though the rule engine
+  is arguably preferable for an *explainable* health-education tool).
+- **Multi-report trends per parameter** (not just overall score) — the
+  data is already in SQLite (`utils/db.py`); add a new `/api/trend`
+  endpoint and chart.
+- **Redis-backed rate limiting** for multi-instance deployments — swap
+  `utils/rate_limit.py`'s in-memory store for `slowapi` + Redis.
+
+---
+
+## 9. Interview-ready explanation
+
+> "The AI Medical Report Explainer helps users understand laboratory
+> reports without medical jargon. After a user uploads a report, the
+> system extracts text using OCR or PDF parsing, identifies key medical
+> parameters with a rule-based NLP parser, compares them with standard
+> reference ranges, and explains abnormal results in plain language. It
+> also provides educational, rule-based health-risk notes and lifestyle
+> suggestions, plus a retrieval-based chatbot for follow-up questions.
+> Configuration is centralized and environment-driven, the app has a
+> tested API layer with CI, a lightweight rate limiter, and Docker support
+> for one-command deployment. Every abnormal result explicitly recommends
+> consulting a healthcare professional — the tool never claims to
+> diagnose anything."
+
+---
+
+## Disclaimer
+
+This application is for educational and informational purposes only. It
+is **not** a medical device, does not provide medical diagnoses, and
+should never replace consultation with a qualified healthcare
+professional.
+#   m e d i c a l - r e p o r t - e x p l a i n e r  
+ 
